@@ -8,7 +8,7 @@ import os
 import sys
 import certifi
 import logging
-from typing import Iterable, Optional, Dict, Any
+from typing import Iterable, Optional, Dict, Any, List
 
 import pandas as pd
 import cfbd
@@ -141,8 +141,36 @@ class DataCollector:
         self.betting_api = cfbd.BettingApi(self.api_client)
         self.ratings_api = cfbd.RatingsApi(self.api_client)
         self.teams_api = cfbd.TeamsApi(self.api_client)
-        
+
         self.call_count = 0
+
+        self._verify_endpoints()
+
+    # ------------------------------------------------------------------
+    def _verify_endpoints(self) -> None:
+        """Ensure the underlying cfbd client exposes the expected methods."""
+
+        required_methods = {
+            "games_api": ["get_games"],
+            "betting_api": ["get_lines"],
+            "ratings_api": ["get_sp", "get_fpi"],
+            "teams_api": ["get_talent", "get_fbs_teams"],
+        }
+
+        missing: List[str] = []
+
+        for api_name, methods in required_methods.items():
+            api_obj = getattr(self, api_name, None)
+            for method in methods:
+                if api_obj is None or not hasattr(api_obj, method):
+                    missing.append(f"{api_name}.{method}")
+
+        if missing:
+            raise AttributeError(
+                "CFBD client missing required endpoints: " + ", ".join(sorted(missing))
+            )
+
+        log.debug("CFBD endpoints verified: %s", required_methods)
     
     def get_games(self, year: int, week: Optional[int] = None, 
                   season_type: str = "regular") -> pd.DataFrame:

@@ -61,6 +61,42 @@ def _df_to_map(df: pd.DataFrame,
     return mapping
 
 
+def _coerce_numeric(df: pd.DataFrame, columns: Sequence[str]) -> pd.DataFrame:
+    """Cast the requested columns to numeric types in-place."""
+
+    if df is None or df.empty:
+        return df
+
+    for col in columns:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+    return df
+
+
+def _normalize_game_id(value: Optional[object]) -> Optional[str]:
+    """Convert a game identifier to a consistent string key."""
+
+    if value is None:
+        return None
+
+    if isinstance(value, (int, np.integer)):
+        return str(int(value))
+
+    if isinstance(value, (float, np.floating)):
+        if np.isnan(value):
+            return None
+        return str(int(value))
+
+    text = str(value).strip()
+    if not text:
+        return None
+
+    try:
+        return str(int(float(text)))
+    except (TypeError, ValueError):
+        return text
+
+
 def _extract_line_values(values: Iterable) -> Tuple[List[float], List[float]]:
     """Helper to pull spread and total numbers from an iterable of line objects/dicts."""
     spreads: List[float] = []
@@ -104,8 +140,8 @@ def _build_lines_dict(lines_df: pd.DataFrame) -> Dict[str, Dict[str, Optional[fl
     total_col = _pick_col(lines_df, ["over_under", "overUnder", "total", "total_open", "total_close"])
 
     for _, row in lines_df.iterrows():
-        game_id = _safe_get(row, [id_col] if id_col else [])
-        if game_id is None:
+        game_id = _normalize_game_id(_safe_get(row, [id_col] if id_col else []))
+        if not game_id:
             continue
 
         spreads: List[float] = []
@@ -128,7 +164,7 @@ def _build_lines_dict(lines_df: pd.DataFrame) -> Dict[str, Dict[str, Optional[fl
             except (TypeError, ValueError):
                 pass
 
-        result[str(game_id)] = {
+        result[game_id] = {
             "spread": float(np.nanmedian(spreads)) if spreads else None,
             "total": float(np.nanmedian(totals)) if totals else None,
         }
@@ -282,6 +318,11 @@ class NCAABettingPipeline:
             if rename_map:
                 normalized_games_df = normalized_games_df.rename(columns=rename_map)
 
+            _coerce_numeric(
+                normalized_games_df,
+                ["season", "week", "home_points", "away_points"],
+            )
+
             for _, game in games_df.iterrows():
                 home_team = _safe_get(game, [home_col])
                 away_team = _safe_get(game, [away_col])
@@ -297,6 +338,12 @@ class NCAABettingPipeline:
                     week_int = int(float(week_val))
                 except (TypeError, ValueError):
                     continue
+
+                season_int: Optional[int] = None
+                try:
+                    season_int = int(float(season_val)) if season_val is not None else None
+                except (TypeError, ValueError):
+                    season_int = None
 
                 try:
                     home_pts_val = float(home_pts)
@@ -330,13 +377,13 @@ class NCAABettingPipeline:
                     away_conf,
                 )
 
-                gid = _safe_get(game, [gid_col]) if gid_col else None
+                gid = _normalize_game_id(_safe_get(game, [gid_col]) if gid_col else None)
                 date_val = _safe_get(game, [date_col]) if date_col else None
 
                 record = {
                     "game_id": gid,
-                    "season": season_val or year,
-                    "week": week_val,
+                    "season": season_int if season_int is not None else int(year),
+                    "week": week_int,
                     "date": date_val,
                     "home_team": home_team,
                     "away_team": away_team,
@@ -349,9 +396,9 @@ class NCAABettingPipeline:
                     "betting_total": None,
                 }
 
-                if gid is not None and str(gid) in lines_lookup:
-                    record["betting_spread"] = lines_lookup[str(gid)]["spread"]
-                    record["betting_total"] = lines_lookup[str(gid)]["total"]
+                if gid and gid in lines_lookup:
+                    record["betting_spread"] = lines_lookup[gid]["spread"]
+                    record["betting_total"] = lines_lookup[gid]["total"]
 
                 record.update(features)
                 all_games.append(record)
@@ -392,6 +439,10 @@ class NCAABettingPipeline:
         date_col = _pick_col(week_games, ["start_date", "startDate", "date", "start_time", "startTime"])
         home_col = _pick_col(week_games, ["home_team", "homeTeam", "home"])
         away_col = _pick_col(week_games, ["away_team", "awayTeam", "away"])
+
+        if not week_games.empty:
+            week_games = week_games.copy()
+            _coerce_numeric(week_games, [col for col in [gid_col, week_col] if col])
 
         normalized_hist = pd.DataFrame()
 
@@ -438,6 +489,11 @@ class NCAABettingPipeline:
             if rename_map_hist:
                 normalized_hist = normalized_hist.rename(columns=rename_map_hist)
 
+            _coerce_numeric(
+                normalized_hist,
+                ["season", "week", "home_points", "away_points"],
+            )
+
         predictions: List[WeeklyPrediction] = []
 
         for _, game in week_games.iterrows():
@@ -445,7 +501,7 @@ class NCAABettingPipeline:
                 home_team = _safe_get(game, [home_col])
                 away_team = _safe_get(game, [away_col])
                 week_val = _safe_get(game, [week_col])
-                gid = _safe_get(game, [gid_col]) if gid_col else None
+                gid = _normalize_game_id(_safe_get(game, [gid_col]) if gid_col else None)
                 date_val = _safe_get(game, [date_col])
 
                 if not home_team or not away_team:
@@ -494,7 +550,7 @@ class NCAABettingPipeline:
                 )
 
                 features_df = pd.DataFrame([features])
-                line_info = lines_lookup.get(str(gid), {}) if gid is not None else {}
+                line_info = lines_lookup.get(gid, {}) if gid else {}
 
                 prediction = self.model.predict(
                     features_df,
