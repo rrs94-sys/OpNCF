@@ -272,6 +272,7 @@ class NCAABettingPipeline:
         """Collect historical data across the requested years and engineer features."""
         conference_lookup = self.collector.build_conference_lookup()
         all_games: List[Dict] = []
+        year_diagnostics: List[str] = []
 
         for year in years:
             print(f"\n[Collecting {year} data]")
@@ -283,6 +284,7 @@ class NCAABettingPipeline:
 
             if games_df.empty:
                 print("  ⚠️  No games returned")
+                year_diagnostics.append(f"{year}: games endpoint returned 0 rows")
                 continue
 
             sp_lookup = _df_to_map(sp_df, ["team", "school"], ["rating", "sp", "overall"], 0.0)
@@ -298,6 +300,29 @@ class NCAABettingPipeline:
             away_col = _pick_col(games_df, ["away_team", "awayTeam"])
             home_pts_col = _pick_col(games_df, ["home_points", "homeScore"])
             away_pts_col = _pick_col(games_df, ["away_points", "awayScore"])
+
+            missing_columns: List[str] = []
+            if not gid_col:
+                missing_columns.append("game id")
+            if not week_col:
+                missing_columns.append("week")
+            if not home_col:
+                missing_columns.append("home team")
+            if not away_col:
+                missing_columns.append("away team")
+            if not home_pts_col:
+                missing_columns.append("home points")
+            if not away_pts_col:
+                missing_columns.append("away points")
+
+            if missing_columns:
+                msg = (
+                    f"{year}: missing required columns ({', '.join(missing_columns)}) - "
+                    f"available columns: {sorted(games_df.columns.tolist())}"
+                )
+                print(f"  ❌ {msg}")
+                year_diagnostics.append(msg)
+                continue
 
             normalized_games_df = games_df.copy()
             rename_map = {}
@@ -337,15 +362,34 @@ class NCAABettingPipeline:
             if "season" in normalized_games_df.columns:
                 normalized_games_df["season"] = normalized_games_df["season"].fillna(int(year))
 
-            required_cols = [col for col in [home_col, away_col, home_pts_col, away_pts_col, week_col]
-                             if col]
-            if required_cols:
-                filtered_games_df = normalized_games_df.dropna(subset=required_cols).copy()
-            else:
-                filtered_games_df = normalized_games_df.copy()
+            total_games = len(normalized_games_df)
+
+            required_cols = [home_col, away_col, home_pts_col, away_pts_col, week_col]
+            completed_mask = pd.Series(True, index=normalized_games_df.index)
+            for col in required_cols:
+                completed_mask &= normalized_games_df[col].notna()
+
+            filtered_games_df = normalized_games_df.loc[completed_mask].copy()
+
+            scored_games = len(filtered_games_df)
+            dropped_games = total_games - scored_games
+
+            print(
+                "  • games fetched: {total} | completed: {scored} | dropped for missing data: {dropped}".format(
+                    total=total_games,
+                    scored=scored_games,
+                    dropped=dropped_games,
+                )
+            )
 
             if filtered_games_df.empty:
-                print("  ⚠️  Games returned without scores; skipping year")
+                msg = (
+                    f"{year}: all {total_games} games dropped due to missing score/week data. "
+                    "First rows: "
+                    f"{normalized_games_df[required_cols].head().to_dict(orient='records')}"
+                )
+                print(f"  ❌ {msg}")
+                year_diagnostics.append(msg)
                 continue
 
             for _, game in filtered_games_df.iterrows():
@@ -434,6 +478,13 @@ class NCAABettingPipeline:
         df = pd.DataFrame(all_games)
         print(f"\n  Total games collected: {len(df)}")
         print(f"  API calls used: {self.collector.call_count}")
+
+        if df.empty:
+            diag_text = "; ".join(year_diagnostics) if year_diagnostics else "no completed games located"
+            raise RuntimeError(
+                "Historical collection returned 0 games. Diagnostics: " + diag_text
+            )
+
         return df
 
     # ------------------------------------------------------------------
