@@ -318,12 +318,37 @@ class NCAABettingPipeline:
             if rename_map:
                 normalized_games_df = normalized_games_df.rename(columns=rename_map)
 
+            # Keep references aligned with the normalized column names so downstream
+            # lookups use the standardized schema regardless of the original casing.
+            gid_col = rename_map.get(gid_col, gid_col)
+            week_col = rename_map.get(week_col, week_col)
+            season_col = rename_map.get(season_col, season_col)
+            date_col = rename_map.get(date_col, date_col)
+            home_col = rename_map.get(home_col, home_col)
+            away_col = rename_map.get(away_col, away_col)
+            home_pts_col = rename_map.get(home_pts_col, home_pts_col)
+            away_pts_col = rename_map.get(away_pts_col, away_pts_col)
+
             _coerce_numeric(
                 normalized_games_df,
                 ["season", "week", "home_points", "away_points"],
             )
 
-            for _, game in games_df.iterrows():
+            if "season" in normalized_games_df.columns:
+                normalized_games_df["season"] = normalized_games_df["season"].fillna(int(year))
+
+            required_cols = [col for col in [home_col, away_col, home_pts_col, away_pts_col, week_col]
+                             if col]
+            if required_cols:
+                filtered_games_df = normalized_games_df.dropna(subset=required_cols).copy()
+            else:
+                filtered_games_df = normalized_games_df.copy()
+
+            if filtered_games_df.empty:
+                print("  ⚠️  Games returned without scores; skipping year")
+                continue
+
+            for _, game in filtered_games_df.iterrows():
                 home_team = _safe_get(game, [home_col])
                 away_team = _safe_get(game, [away_col])
                 week_val = _safe_get(game, [week_col])
@@ -331,7 +356,10 @@ class NCAABettingPipeline:
                 home_pts = _safe_get(game, [home_pts_col])
                 away_pts = _safe_get(game, [away_pts_col])
 
-                if home_team is None or away_team is None or pd.isna(home_pts) or pd.isna(away_pts):
+                if home_team is None or away_team is None:
+                    continue
+
+                if pd.isna(home_pts) or pd.isna(away_pts):
                     continue
 
                 try:
@@ -351,8 +379,8 @@ class NCAABettingPipeline:
                 except (TypeError, ValueError):
                     continue
 
-                home_metrics = self.engineer.calculate_team_metrics(home_team, normalized_games_df, week_int, int(year))
-                away_metrics = self.engineer.calculate_team_metrics(away_team, normalized_games_df, week_int, int(year))
+                home_metrics = self.engineer.calculate_team_metrics(home_team, filtered_games_df, week_int, int(year))
+                away_metrics = self.engineer.calculate_team_metrics(away_team, filtered_games_df, week_int, int(year))
 
                 home_sp = sp_lookup.get(home_team, 0.0)
                 away_sp = sp_lookup.get(away_team, 0.0)
